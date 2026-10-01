@@ -951,7 +951,7 @@ To run tests:
 bun run test
 ```
 
-This generates the embedded browser engine before running tests. After `bun run build:engine`, targeted tests can use `bun test` directly.
+This builds the package before running tests. After `bun run build`, targeted tests can use `bun test` directly.
 
 For browser tests, install Chromium once and run:
 

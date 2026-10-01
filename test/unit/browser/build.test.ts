@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { build } from "esbuild";
+import { build } from "tsdown";
+import ts from "typescript";
+import { browserWorkerPlugin, buildWorker } from "../../../scripts/browser-worker.js";
 
 test("the browser entry bundles without filesystem, child process or crypto imports", async () => {
     // A separate process keeps this audit independent of Bun test's module-resolution cache.
@@ -7,7 +9,7 @@ test("the browser entry bundles without filesystem, child process or crypto impo
         cmd: [
             Bun.argv[0] as string,
             "build",
-            new URL("../../../src/browser/index.ts", import.meta.url).pathname,
+            new URL("../../../dist/browser/index.js", import.meta.url).pathname,
             "--target=browser",
         ],
         stdout: "pipe",
@@ -25,17 +27,52 @@ test("the browser entry bundles without filesystem, child process or crypto impo
 });
 
 test("the UI module graph excludes archive, index preparation and Node compatibility implementations", async () => {
-    const bundle = await build({
-        entryPoints: ["src/browser/index.ts"],
-        bundle: true,
+    const { bundles } = await build({
+        config: false,
+        entry: ["src/browser/index.ts"],
         platform: "browser",
+        format: "esm",
+        dts: false,
         write: false,
-        metafile: true,
+        clean: false,
+        exports: false,
+        logLevel: "warn",
+        deps: { neverBundle: true },
+        plugins: [browserWorkerPlugin()],
     });
-    const inputs = Object.keys(bundle.metafile?.inputs ?? {});
+    const inputs = bundles.flatMap((bundle) =>
+        bundle.chunks.flatMap((chunk) => (chunk.type === "chunk" ? chunk.moduleIds : [])),
+    );
     expect(inputs.length).toBeGreaterThan(0);
     expect(inputs.some((path) => path.includes("src/browser/worker/"))).toBe(false);
     expect(inputs.some((path) => /node_modules\/(?:modern-tar|memfs|@npmcli\/arborist|pacote)\//.test(path))).toBe(
         false,
     );
+});
+
+test("the embedded Worker has no unresolved literal imports or Node builtin require calls", async () => {
+    const { code } = await buildWorker();
+    const source = ts.createSourceFile("worker.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const imports: string[] = [];
+    const builtinLoads: string[] = [];
+    function inspect(node: ts.Node): void {
+        if (ts.isImportDeclaration(node)) imports.push(node.moduleSpecifier.getText(source));
+        if (ts.isCallExpression(node)) {
+            const argument = node.arguments[0];
+            if (node.expression.kind === ts.SyntaxKind.ImportKeyword && argument && ts.isStringLiteral(argument))
+                imports.push(argument.text);
+            if (
+                ts.isIdentifier(node.expression) &&
+                node.expression.text === "require" &&
+                argument &&
+                ts.isStringLiteral(argument) &&
+                /^(?:node:|fs$|path$|crypto$|child_process$|http$|https$|net$|tls$)/.test(argument.text)
+            )
+                builtinLoads.push(argument.text);
+        }
+        ts.forEachChild(node, inspect);
+    }
+    inspect(source);
+    expect(imports).toEqual([]);
+    expect(builtinLoads).toEqual([]);
 });

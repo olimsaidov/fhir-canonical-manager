@@ -1,6 +1,6 @@
+import { workerSource } from "virtual:fcm-worker";
 import type { Cache } from "./cache.js";
 import type { Fetch } from "./fetch.js";
-import { workerSource } from "./generated.js";
 import { deserializeError, type HostMethods, type PrepareOptions, type WorkerMethods } from "./protocol.js";
 import { createRpc } from "./rpc.js";
 

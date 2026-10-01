@@ -15,7 +15,7 @@
       "biome.json",
       "tsconfig*.json",
       "playwright.config.ts",
-      "!src/browser/generated.ts"
+      "tsdown.config.ts"
     ]
   },
   "formatter": {
