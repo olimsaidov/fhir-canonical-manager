@@ -232,7 +232,10 @@ test("callback failures preserve the committed state and never publish or cache 
         expect((await manager.read(entry)).marker).toBe("a@1.0.0");
     }
     phase = "resource";
-    await expect(manager.read(entry)).rejects.toThrow("resource closure failed");
+    // Bun 1.4.2's rejects.toThrow stalls Worker messages; await the RPC before asserting.
+    const readError = await manager.read(entry).catch((error: unknown) => error);
+    expect(readError).toBeInstanceOf(Error);
+    expect(readError).toHaveProperty("message", expect.stringContaining("resource closure failed"));
     expect(await manager.searchEntries({})).toHaveLength(1);
     phase = "";
     expect((await manager.read(entry)).marker).toBe("a@1.0.0");
