@@ -47,14 +47,12 @@ console.log(resource.url); // http://hl7.org/fhir/StructureDefinition/Patient
 
 ## Browser usage
 
-Use the browser entry with the same factory name. Bundle it with your application; its Worker supplies its own runtime adapters, so the application does not need Node polyfills. A Content Security Policy must permit `worker-src blob:` and `connect-src` access to the registry. No `unsafe-eval` is required.
+Import the browser entry and bundle it with your application. Package preparation and resource parsing run in a Worker; custom `fetch` and patch callbacks run in the caller.
 
 ```typescript
 import { createCanonicalManager } from '@atomic-ehr/fhir-canonical-manager/browser';
 
-const manager = createCanonicalManager({
-    packages: ['hl7.fhir.r4.core@4.0.1'],
-});
+const manager = createCanonicalManager({ packages: ['hl7.fhir.r4.core@4.0.1'] });
 await manager.init();
 const patient = await manager.resolve('http://hl7.org/fhir/StructureDefinition/Patient');
 const humanName = await manager.resolve('http://hl7.org/fhir/StructureDefinition/HumanName', {
@@ -63,9 +61,11 @@ const humanName = await manager.resolve('http://hl7.org/fhir/StructureDefinition
 await manager.destroy();
 ```
 
-Packages are fetched directly from `https://packages.simplifier.net/`. Another `registry` must serve npm-compatible packuments with `dist.tarball` and an advertised `dist.integrity` or `dist.shasum`; its selected tarballs must have the same origin and allow browser CORS requests. `fetch` can supply a request function and receives supported headers, method, cancellation, omitted credentials and rejected redirects. There is no fallback to public npm. The browser treats packages as data and never runs lifecycle scripts.
+Use `sourceContext: { id: resource.id }` to resolve within that resource's package and dependency closure. `resolve(..., { version })` selects a FHIR resource version; `sourceContext.package.version` selects a package version.
 
-The default cache is in memory. For persistence and offline reloads, supply IndexedDB:
+The default registry is `https://packages.simplifier.net/`. A custom `registry` must serve npm-compatible package metadata with `dist.tarball` and `dist.integrity` or `dist.shasum`. Tarballs must share the registry's origin, and all requests must allow browser CORS.
+
+Caching defaults to memory. For persistence and offline reloads, supply IndexedDB:
 
 ```typescript
 import { createCanonicalManager, createIndexedDbCache } from '@atomic-ehr/fhir-canonical-manager/browser';
@@ -73,40 +73,18 @@ import { createCanonicalManager, createIndexedDbCache } from '@atomic-ehr/fhir-c
 const cache = await createIndexedDbCache('my-fhir-packages');
 const manager = createCanonicalManager({ packages: ['hl7.fhir.r4.core@4.0.1'], cache });
 await manager.init();
-// Later, release this manager and the cache connection that your application owns:
+// Resolve and read resources here.
 await manager.destroy();
 cache.close();
 ```
 
-Pinned `@npmcli/arborist@10.0.3` and pacote own version selection, placement, conflicts and cycles. After pacote selects a version, the adapter verifies that source's advertised checksum, extracts the original manifest, validates its transport identity, then applies manifest patches before Arborist reads its dependencies. Registries may omit dependencies from their packuments. Intentional metadata renames do not change the verified transport identity. npm may examine and verify a candidate it ultimately does not install; only the resulting graph is indexed.
+Cached metadata is reused until `flushCache()` or `dropCache: true`; call `init()` after flushing. Patches are applied separately for each manager. Built-in caches commit atomically; custom caches need `putMany(entries, signal)` for atomic commits. Failed or cancelled initialization preserves the previously committed manager state. Call `destroy()` when finished; close an IndexedDB cache connection when your application no longer uses it.
 
-The cache stores unpatched packuments and verified compressed archives, separated by registry, URL and advertised checksum. Cached metadata pins offline selection until `flushCache()` or `dropCache: true`. Patches and indexes are rebuilt per manager. Built-in memory/IndexedDB caches atomically commit a successful initialization; custom caches can implement `putMany(entries, signal)` for the same atomicity. Failed or cancelled operations keep the previous manager state usable.
+Browser requirements and limits:
 
-The Worker owns ordinary fetching, verification, extraction, manifest hydration, Arborist, index collection and reference hashing. Expanded files stay there; the main thread receives a compact graph/index and handles queries. `read()` requests a freshly parsed resource through typed RPC. Custom `fetch` and patch closures run in the caller's realm: manifest callbacks run before dependency resolution, index callbacks process the prepared index, and resource callbacks run per read. The caller's cache remains the single transaction owner; custom response streams and compressed cache bytes cross the boundary, while expanded archives do not.
-
-Each initialization prepares a candidate Worker. After index callbacks and cache commit succeed, its snapshot becomes current and the previous Worker retires after pending reads finish. Cancellation covers cache clearing before Worker creation too; `destroy()` immediately aborts active operations and releases all of that manager's Workers. It settles without waiting for an unresolved custom cache callback. Cancellation stops waiting and prevents late publication; side effects inside a custom callback remain that callback's responsibility. Call `destroy()` when the manager is no longer needed. Custom callbacks and compact snapshot processing can still consume UI time; no stage CPU ranking or responsiveness improvement is claimed.
-
-Authored browser source and adapters use TypeScript/ESM. `worker-client.ts` and `protocol.ts` define the boundary; `worker/prepare.ts` coordinates `registry.ts`, `archive.ts`, `graph.ts`, `arborist.ts` and `index.ts`. `worker/adapters/` contains narrow Node compatibility modules. The build generates tiny CommonJS export bridges for upstream `require()` shapes and embeds the compiled Worker; npm's source remains unchanged. `bun run typecheck` checks both host and Worker code.
-
-`sourceContext: { id: resource.id }` follows the requesting resource's package and declared dependency closure, preferring nearer dependencies. It does not fall through into unrelated packages. `sourceContext.package.version` selects a **package version**; `resolve(..., { version })` and `url|version` select a **FHIR resource version**. Without context, configured roots take precedence in configuration order, followed by dependencies. If several installation scopes contain the same package version, use a resource ID for an unambiguous context.
-
-The browser entry shares search, index parsing, index recovery, patch helpers and diagnostics with the Node entry. Index patches run per manager load and resource patches per read. Browser contexts retain npm's installation locations, `edge.to` and `Link.target`; repeated versions in different locations keep distinct IDs. Explicit roots with different versions of the same name use ordinary synthetic npm workspaces. The Node installer, entry and CLI retain their existing behavior.
-
-Supported dependency specifications are npm semver ranges, exact versions and tags; npm handles dependency/peer/optional placement. Selected archives always fail closed on integrity, identity or admission errors. Executable packages, bundled dependencies, git/file/URL/npm-alias sources and filesystem-path imports (`addLocalPackage` / `addTgzPackage`) are unsupported. The Worker explicitly rejects unsupported runtime operations. Web Streams, gzip `DecompressionStream` and Web Crypto require a modern secure browser context.
-
-Use `signal` to cancel work, `requestTimeoutMs` (default 60 seconds) and `graphTimeoutMs` (default 180 seconds) to bound requests and preparation. `archiveLimits` defaults to 200 MiB decompressed bytes and 25,000 entries per archive; compressed responses are bounded too. Large public dependency sets may need higher explicit bounds. The real Chrome US Core acceptance run uses:
-
-```typescript
-const manager = createCanonicalManager({
-    packages: ['hl7.fhir.us.core@6.1.0'],
-    requestTimeoutMs: 120_000,
-    graphTimeoutMs: 270_000,
-    archiveLimits: { maxBytes: 512 * 1024 * 1024, maxFiles: 50_000 },
-});
-await manager.init();
-```
-
-Browser checks: `bun run test:browser:install` installs Chromium once, then `bun run test:browser` builds the embedded engine and runs packaged-consumer CORS and persistent-reload tests. Set `FCM_BROWSER_EXECUTABLE` to an existing Chrome executable. Set `FCM_BROWSER_LIVE=1` to include real US Core 6.1.0 loading with all eleven archive checks. Node/browser graph fixtures compare public Arborist APIs on compatible native Node 22.22.2+, 24.15+, or 26+.
+- A modern secure browser context with Web Streams, gzip `DecompressionStream` and Web Crypto. CSP must allow `worker-src blob:` and `connect-src` for the registry.
+- Dependencies may use semver ranges, exact versions or tags. Executable/bundled packages, git/file/URL/npm-alias dependencies and filesystem imports (`addLocalPackage` / `addTgzPackage`) are unsupported.
+- `signal` accepts an `AbortSignal`. `requestTimeoutMs` defaults to 60,000 and `graphTimeoutMs` to 180,000. `archiveLimits` defaults to 200 MiB decompressed bytes and 25,000 entries per archive. Large IGs may need higher limits or timeouts.
 
 ## CLI Usage
 
@@ -974,6 +952,15 @@ bun run test
 ```
 
 This generates the embedded browser engine before running tests. After `bun run build:engine`, targeted tests can use `bun test` directly.
+
+For browser tests, install Chromium once and run:
+
+```bash
+bun run test:browser:install
+bun run test:browser
+```
+
+Set `FCM_BROWSER_EXECUTABLE` to use an existing Chrome executable, or `FCM_BROWSER_LIVE=1` to include live US Core loading.
 
 To run the example:
 
