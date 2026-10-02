@@ -12,6 +12,7 @@ export async function extractPackage(
     body: ReadableStream<Uint8Array>,
     limits: ArchiveLimits = {},
     signal?: AbortSignal,
+    progress?: (entries: number) => void,
 ): Promise<PackageContent> {
     const maxBytes = limits.maxBytes ?? 200 * 1024 * 1024;
     const maxFiles = limits.maxFiles ?? 25_000;
@@ -43,6 +44,7 @@ export async function extractPackage(
             await entry.body.cancel();
             throw new Error(`Package archive exceeds ${maxFiles} entries`);
         }
+        if (count % 128 === 0) progress?.(count);
         if (entry.header.type !== "file" || !name.startsWith("package/")) {
             // Drain incrementally: cancelling a large body can block the decoder's bounded input buffer.
             for await (const _chunk of entry.body) {
@@ -57,6 +59,7 @@ export async function extractPackage(
         }
         files[filename] = await new Response(entry.body).text();
     }
+    progress?.(count);
     const manifest = files["package.json"];
     if (!manifest) throw new Error("Package archive is missing package/package.json");
     const packageJson = JSON.parse(manifest) as PackageJson;

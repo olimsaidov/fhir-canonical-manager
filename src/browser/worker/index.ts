@@ -5,13 +5,16 @@ import {
     type ResourceSource,
 } from "../../core/resource-index.js";
 import type { IndexEntry, ReportEntry } from "../../types/index.js";
-import type { PrepareOptions, ReferenceMetadata, Snapshot } from "../protocol.js";
+import type { PrepareOptions, Progress, ReferenceMetadata, Snapshot } from "../protocol.js";
 import type { installGraph } from "./graph.js";
 
 export async function buildIndex(
     graph: Awaited<ReturnType<typeof installGraph>>,
     options: PrepareOptions,
+    progress?: (event: Progress) => void,
 ): Promise<Snapshot> {
+    let resources = 0;
+    progress?.({ phase: "index", resources, done: false });
     const reports: ReportEntry[] = [];
     if (options.deprecatedIndexOption)
         reports.push({ kind: "deprecation", message: "ignorePackageIndex is deprecated; use packageIndex instead." });
@@ -54,6 +57,7 @@ export async function buildIndex(
                 package: node.pkg,
             };
             (entries[entry.url] ??= []).push(record);
+            if (++resources % 128 === 0) progress?.({ phase: "index", resources, done: false });
             references[id] = {
                 packageName: node.pkg.name,
                 packageVersion: node.pkg.version,
@@ -65,6 +69,7 @@ export async function buildIndex(
             };
         }
     }
+    progress?.({ phase: "index", resources, done: true });
     return {
         entries,
         references,

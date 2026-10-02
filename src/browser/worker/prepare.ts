@@ -4,6 +4,7 @@ import type { createRpc } from "../rpc.js";
 import { customFetch } from "./custom-fetch.js";
 import { installGraph } from "./graph.js";
 import { buildIndex } from "./index.js";
+import { createProgress } from "./progress.js";
 import { createRegistry } from "./registry.js";
 
 export async function preparePackages(
@@ -11,6 +12,9 @@ export async function preparePackages(
     rpc: ReturnType<typeof createRpc<HostMethods, WorkerMethods>>,
 ) {
     const signal = AbortSignal.timeout(options.graphTimeoutMs ?? 180_000);
+    const progress = options.progress
+        ? createProgress((updates) => postMessage({ type: "progress", updates }), signal)
+        : undefined;
     const cache: Cache = {
         get: <T>(key: string) => rpc.call("cacheGet", { key }, signal) as Promise<T | undefined>,
         async put(key, value) {
@@ -31,8 +35,10 @@ export async function preparePackages(
         ...options,
         fetch: options.customFetch ? customFetch(rpc) : undefined,
         cache,
+        onProgress: progress?.report,
     }).session(signal);
     try {
+        progress?.report({ phase: "resolve", done: false });
         const graph = await installGraph(options.specs, {
             ...session,
             signal,
@@ -42,7 +48,8 @@ export async function preparePackages(
                     : Promise.resolve({ manifest, reports: [] }),
         });
         signal.throwIfAborted();
-        const snapshot = await buildIndex(graph, options);
+        progress?.report({ phase: "resolve", done: true });
+        const snapshot = await buildIndex(graph, options, progress?.report);
         signal.throwIfAborted();
         const locations = new Map(graph.nodes.map((node) => [node.scope, node]));
         return {
@@ -62,5 +69,8 @@ export async function preparePackages(
     } catch (error) {
         session.discard();
         throw error;
+    } finally {
+        progress?.flush();
+        progress?.close();
     }
 }

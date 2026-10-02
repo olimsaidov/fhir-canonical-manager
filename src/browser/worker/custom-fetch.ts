@@ -47,7 +47,11 @@ export function customFetch(rpc: ReturnType<typeof createRpc<HostMethods, Worker
             statusText: response.statusText,
             headers: response.headers,
         });
-        Object.defineProperties(result, { url: { value: response.url }, redirected: { value: response.redirected } });
+        Object.defineProperties(result, {
+            url: { value: response.url },
+            redirected: { value: response.redirected },
+            type: { value: response.type },
+        });
         return result;
     };
 }

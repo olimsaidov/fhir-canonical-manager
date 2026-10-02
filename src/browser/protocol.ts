@@ -4,6 +4,23 @@ export interface ArchiveLimits {
     maxBytes?: number;
     maxFiles?: number;
 }
+/** Archive-body bytes delivered by Fetch; done marks EOF, before integrity verification. */
+export interface DownloadProgress {
+    phase: "download";
+    package: PackageId;
+    receivedBytes: number;
+    totalBytes?: number;
+    done: boolean;
+}
+/** Progress of one initialization/addition; resolution can overlap package phases. */
+export type Progress =
+    | { phase: "resolve"; done: boolean }
+    | { phase: "cache"; action: "clear" | "commit"; done: boolean }
+    | { phase: "verify"; package: PackageId; done: boolean }
+    | { phase: "extract"; package: PackageId; entries: number; done: boolean }
+    | { phase: "index"; resources: number; done: boolean }
+    | DownloadProgress
+    | { phase: "ready"; packages: number; resources: number };
 export interface SelectedManifest extends PackageJson {
     dist: { tarball: string; shasum?: string; integrity?: string };
     _resolved?: string;
@@ -61,6 +78,7 @@ export interface PrepareOptions {
     customFetch: boolean;
     manifestPatches: boolean;
     atomicCache: boolean;
+    progress?: boolean;
 }
 export interface WorkerMethods {
     prepare: { input: PrepareOptions; output: Snapshot };
@@ -85,6 +103,7 @@ export interface HostMethods {
             headers: [string, string][];
             url: string;
             redirected: boolean;
+            type: Response["type"];
             hasBody: boolean;
         };
     };

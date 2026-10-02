@@ -1,8 +1,9 @@
 import type { Cache } from "../cache.js";
 import type { Fetch } from "../fetch.js";
 import { cachePrefix, normalizeRegistry, parsePackageSpec, validateDependencies } from "../package-spec.js";
-import type { ArchiveLimits, MetadataRequest, MetadataResponse, SelectedManifest } from "../protocol.js";
+import type { ArchiveLimits, MetadataRequest, MetadataResponse, Progress, SelectedManifest } from "../protocol.js";
 import { extractPackage, type PackageContent } from "./archive.js";
+import { downloadReporter } from "./progress.js";
 
 export function createRegistry(config: {
     registry?: string;
@@ -10,6 +11,7 @@ export function createRegistry(config: {
     cache: Cache;
     archiveLimits?: ArchiveLimits;
     requestTimeoutMs?: number;
+    onProgress?: (progress: Progress) => void;
 }) {
     const registry = normalizeRegistry(config.registry);
     const endpoint = new URL(registry);
@@ -119,16 +121,28 @@ export function createRegistry(config: {
                                     response,
                                     config.archiveLimits?.maxBytes ?? 200 * 1024 * 1024,
                                     operationSignal,
+                                    config.onProgress ? downloadReporter(response, pkg, config.onProgress) : undefined,
                                 );
                             }
+                            config.onProgress?.({ phase: "verify", package: pkg, done: false });
                             await verifyIntegrity(bytes, integrity);
+                            config.onProgress?.({ phase: "verify", package: pkg, done: true });
                             check();
                             operationSignal.throwIfAborted();
+                            config.onProgress?.({ phase: "extract", package: pkg, entries: 0, done: false });
+                            let entries = 0;
                             const content = await extractPackage(
                                 new Blob([bytes as Uint8Array<ArrayBuffer>]).stream(),
                                 config.archiveLimits,
                                 operationSignal,
+                                config.onProgress
+                                    ? (count) => {
+                                          entries = count;
+                                          config.onProgress?.({ phase: "extract", package: pkg, entries, done: false });
+                                      }
+                                    : undefined,
                             );
+                            config.onProgress?.({ phase: "extract", package: pkg, entries, done: true });
                             if (content.packageJson.name !== pkg.name || content.packageJson.version !== pkg.version)
                                 throw new Error(
                                     `FHIR package manifest identity ${content.packageJson.name}@${content.packageJson.version} does not match ${pkg.name}@${pkg.version}`,
@@ -200,6 +214,7 @@ async function readBounded(
     response: Response,
     maxBytes: number,
     signal: AbortSignal,
+    progress?: (receivedBytes: number, done: boolean) => void,
 ): Promise<Uint8Array<ArrayBuffer>> {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Archive limits must be positive integers");
     if (!response.body) throw new Error("FHIR registry returned no response body");
@@ -207,13 +222,16 @@ async function readBounded(
     const chunks: Uint8Array[] = [];
     let total = 0;
     try {
+        progress?.(0, false);
         while (true) {
             signal.throwIfAborted();
             const { done, value } = await reader.read();
+            signal.throwIfAborted();
             if (done) break;
             total += value.length;
             if (total > maxBytes) throw new Error(`FHIR response exceeds ${maxBytes} bytes`);
             chunks.push(value);
+            progress?.(total, false);
         }
     } catch (error) {
         await reader.cancel().catch(() => undefined);
@@ -228,5 +246,6 @@ async function readBounded(
         result.set(chunk, offset);
         offset += chunk.length;
     }
+    progress?.(total, true);
     return result;
 }

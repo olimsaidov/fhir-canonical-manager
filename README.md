@@ -52,7 +52,18 @@ Import the browser entry and bundle it with your application. Package preparatio
 ```typescript
 import { createCanonicalManager } from '@atomic-ehr/fhir-canonical-manager/browser';
 
-const manager = createCanonicalManager({ packages: ['hl7.fhir.r4.core@4.0.1'] });
+const manager = createCanonicalManager({
+    packages: ['hl7.fhir.r4.core@4.0.1'],
+    onProgress(event) { // optional, browser only
+        if (event.phase === 'download') {
+            console.log(event.package.name, event.receivedBytes, event.totalBytes ?? 'unknown total');
+        } else if (event.phase === 'ready') {
+            console.log(`Ready: ${event.packages} packages, ${event.resources} resources`);
+        } else {
+            console.log(event.phase, event.done ? 'complete' : 'working');
+        }
+    },
+});
 await manager.init();
 const patient = await manager.resolve('http://hl7.org/fhir/StructureDefinition/Patient');
 const humanName = await manager.resolve('http://hl7.org/fhir/StructureDefinition/HumanName', {
@@ -64,6 +75,10 @@ await manager.destroy();
 Use `sourceContext: { id: resource.id }` to resolve within that resource's package and dependency closure. `resolve(..., { version })` selects a FHIR resource version; `sourceContext.package.version` selects a package version.
 
 The default registry is `https://packages.simplifier.net/`. A custom `registry` must serve npm-compatible package metadata with `dist.tarball` and `dist.integrity` or `dist.shasum`. Tarballs must share the registry's origin, and all requests must allow browser CORS.
+
+`onProgress` observes initialization/additions through `resolve`, `download`, `verify`, `extract`, `index`, `cache` and `ready` phases. Resolution can overlap package phases. Active/completed phases carry `done`; downloads include `package`, `receivedBytes` and optional `totalBytes`, extraction counts tar `entries`, and indexing counts `resources`. `cache` distinguishes `clear`/`commit`; `ready` reports unique packages and final indexed entries after committed state is published. Await `init()` for success; no global percentage is guessed.
+
+Worker updates are coalesced about every 100 ms, preserving phase boundaries. Cached archives skip download but are verified/extracted again. Download bytes count the Fetch body before tar/gzip extraction, not HTTP-encoded wire bytes; totals are omitted when lengths/encoding are unreliable or hidden by CORS. Download EOF is not verification. Cancellation stops new notifications. Observers run in the caller, are never awaited, and their throws/rejections do not interrupt preparation.
 
 Caching defaults to memory. For persistence and offline reloads, supply IndexedDB:
 

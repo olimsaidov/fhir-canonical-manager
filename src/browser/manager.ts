@@ -16,7 +16,8 @@ import { type Cache, createMemoryCache } from "./cache.js";
 import type { Fetch } from "./fetch.js";
 import { dependencyLevels, type PackageNode, restoreGraph } from "./graph.js";
 import { cachePrefix, normalizeRegistry, parsePackageSpec } from "./package-spec.js";
-import type { ArchiveLimits } from "./protocol.js";
+import { notifyProgress } from "./progress.js";
+import type { ArchiveLimits, Progress } from "./protocol.js";
 import { createWorkerClient, type WorkerClient } from "./worker-client.js";
 
 export interface Config extends Omit<NodeConfig, "workingDir" | "packageManager"> {
@@ -26,6 +27,8 @@ export interface Config extends Omit<NodeConfig, "workingDir" | "packageManager"
     signal?: AbortSignal;
     requestTimeoutMs?: number;
     graphTimeoutMs?: number;
+    /** Initialization/addition progress. Callback failures never interrupt preparation. */
+    onProgress?: (progress: Progress) => void | Promise<void>;
 }
 
 interface Metadata extends IndexReference {
@@ -141,13 +144,19 @@ export function createCanonicalManager(config: Config): CanonicalManager {
                         nextReports.push(entry);
                     }
                 };
-                if (config.dropCache) await awaitCancellation(cache.clear(cachePrefix(registry)), signal);
+                if (config.dropCache) {
+                    notifyProgress(config.onProgress, { phase: "cache", action: "clear", done: false }, signal);
+                    signal.throwIfAborted();
+                    await awaitCancellation(cache.clear(cachePrefix(registry)), signal);
+                    notifyProgress(config.onProgress, { phase: "cache", action: "clear", done: true }, signal);
+                }
                 signal.throwIfAborted();
                 const nextClient: WorkerClient = createWorkerClient(
                     {
                         cache,
                         fetch: config.fetch,
                         requestTimeoutMs: config.requestTimeoutMs,
+                        onProgress: config.onProgress,
                         onClose: () => {
                             clients.delete(nextClient);
                         },
@@ -203,7 +212,10 @@ export function createCanonicalManager(config: Config): CanonicalManager {
                     // Arbitrary closures stay in their caller's realm; the raw index is already built.
                     applyIndexEntryPatches(index, patches.indexEntry, reportNext);
                     signal.throwIfAborted();
+                    notifyProgress(config.onProgress, { phase: "cache", action: "commit", done: false }, signal);
+                    signal.throwIfAborted();
                     await nextClient.commit();
+                    notifyProgress(config.onProgress, { phase: "cache", action: "commit", done: true }, signal);
                     signal.throwIfAborted();
                     const previous = state;
                     state = { graph, index, references, client: nextClient };
@@ -211,6 +223,21 @@ export function createCanonicalManager(config: Config): CanonicalManager {
                     reportKeys = nextKeys;
                     query.clearSearchParameterCache();
                     previous?.client.retire();
+                    if (config.onProgress)
+                        notifyProgress(
+                            config.onProgress,
+                            {
+                                phase: "ready",
+                                packages: new Set(
+                                    graph.nodes.map((node) => JSON.stringify([node.pkg.name, node.pkg.version])),
+                                ).size,
+                                resources: Object.values(index.entries).reduce(
+                                    (count, entries) => count + entries.length,
+                                    0,
+                                ),
+                            },
+                            signal,
+                        );
                     return graph.installed;
                 } catch (error) {
                     nextClient.close(error instanceof Error ? error : new Error(String(error)));

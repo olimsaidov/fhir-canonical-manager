@@ -1,7 +1,14 @@
 import { workerSource } from "virtual:fcm-worker";
 import type { Cache } from "./cache.js";
 import type { Fetch } from "./fetch.js";
-import { deserializeError, type HostMethods, type PrepareOptions, type WorkerMethods } from "./protocol.js";
+import { notifyProgress } from "./progress.js";
+import {
+    deserializeError,
+    type HostMethods,
+    type PrepareOptions,
+    type Progress,
+    type WorkerMethods,
+} from "./protocol.js";
 import { createRpc } from "./rpc.js";
 
 export interface ClientConfig {
@@ -9,6 +16,7 @@ export interface ClientConfig {
     fetch?: Fetch;
     requestTimeoutMs?: number;
     onClose?: () => void;
+    onProgress?: (progress: Progress) => void | Promise<void>;
     patchManifest?: (input: HostMethods["patchManifest"]["input"]) => HostMethods["patchManifest"]["output"];
 }
 
@@ -95,6 +103,7 @@ export function createWorkerClient(config: ClientConfig, signal?: AbortSignal) {
                 headers: [...response.headers.entries()],
                 url: response.url,
                 redirected: response.redirected,
+                type: response.type,
                 hasBody: Boolean(response.body),
             };
         },
@@ -150,11 +159,17 @@ export function createWorkerClient(config: ClientConfig, signal?: AbortSignal) {
             URL.revokeObjectURL(url);
             resolveReady();
         } else if (data.type === "fatal") close(deserializeError(data.error));
+        else if (data.type === "progress") {
+            for (const progress of data.updates as Progress[]) {
+                if (closed || active.aborted) break;
+                notifyProgress(config.onProgress, progress, active);
+            }
+        }
     };
     worker.addEventListener("message", startup);
     worker.onerror = (event) => close(new Error(`FHIR Worker failed: ${event.message}`));
     return {
-        async prepare(options: Omit<PrepareOptions, "customFetch" | "manifestPatches" | "atomicCache">) {
+        async prepare(options: Omit<PrepareOptions, "customFetch" | "manifestPatches" | "atomicCache" | "progress">) {
             check();
             const abort = () => rejectReady(active.reason);
             active.addEventListener("abort", abort, { once: true });
@@ -171,6 +186,7 @@ export function createWorkerClient(config: ClientConfig, signal?: AbortSignal) {
                     customFetch: Boolean(config.fetch),
                     manifestPatches: Boolean(config.patchManifest),
                     atomicCache: Boolean(config.cache.putMany),
+                    progress: Boolean(config.onProgress),
                 },
                 active,
             );
